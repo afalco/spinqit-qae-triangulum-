@@ -71,7 +71,7 @@ Each run produces structured outputs capturing:
 - chosen discretization rule (left/right/midpoint),
 - amplification indices $$\mathcal{K}$$,
 - shot counts and ancilla statistics per $$k$$,
-- fitted amplitude $$\hat a$$ and derived integral estimate $\widehat{I}(y).$
+- fitted amplitude $$\hat a$$ and derived integral estimate $$\widehat{I}(y).$$
 
 These outputs are intended to support:
 - cross-backend comparisons,
