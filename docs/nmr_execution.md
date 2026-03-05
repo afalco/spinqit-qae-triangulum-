@@ -175,7 +175,9 @@ I_S = (I_left + 4 I_mid + I_right)/6
 
 To merge all raw JSON runs into two CSV summary files:
 
+```bash
 python scripts/03_summarize_results.py --indir data/raw --outdir data/processed
+```
 
 Outputs:
 	•	data/processed/summary_runs.csv (one row per run)
