@@ -28,14 +28,14 @@ From the repository root:
 python -m venv .venv
 source .venv/bin/activate        # macOS/Linux
 # .venv\Scripts\activate         # Windows PowerShell
-```
 pip install -U pip
 pip install -r requirements.txt
-
+```
 Sanity check:
 
+```bash
 python -c "import spinqit; print('spinqit ok')"
-
+```
 
 ⸻
 
@@ -43,7 +43,9 @@ python -c "import spinqit; print('spinqit ok')"
 
 Before running any experiment, verify that the device is reachable:
 
+```bash
 nc -vz -w 2 <TRIANGULUM_IP> 55444
+```
 
 Expected output: succeeded.
 
@@ -66,6 +68,7 @@ This is the reference configuration intended to work under typical hardware cons
 	•	rule: midpoint
 	•	y: 1.0
 
+```bash
 python scripts/02_run_mlae_triangulum.py \
   --ip <TRIANGULUM_IP> \
   --port 55444 \
@@ -79,6 +82,7 @@ python scripts/02_run_mlae_triangulum.py \
   --shots 4096 \
   --ancilla-bit-index-from-right 2 \
   --outdir data/raw
+```
 
 On success the script prints:
 	•	the locations of the written files,
@@ -116,9 +120,11 @@ Interpretation:
 
 If you suspect the extracted probabilities are incorrect (e.g., p_hat always ~0 or ~1), run the same command with three settings:
 
+```bash
 python scripts/02_run_mlae_triangulum.py ... --ancilla-bit-index-from-right 0
 python scripts/02_run_mlae_triangulum.py ... --ancilla-bit-index-from-right 1
 python scripts/02_run_mlae_triangulum.py ... --ancilla-bit-index-from-right 2
+```
 
 Choose the setting that yields sensible p_hat values and coherent variation across k.
 
@@ -132,10 +138,12 @@ Start shallow and conservative:
 	•	--ks 0,1
 	•	--shots 1024
 
+```bash
 python scripts/02_run_mlae_triangulum.py \
   --ip <TRIANGULUM_IP> --port 55444 --account <USER> --password <PASSWORD> \
   --y 1.0 --rule midpoint --ks 0,1 --shots 1024 \
   --ancilla-bit-index-from-right 2 --outdir data/raw
+```
 
 If this works reliably, increase to:
 	•	--ks 0,1,2
