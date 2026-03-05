@@ -73,6 +73,7 @@ Each run produces structured outputs capturing:
 - shot counts and ancilla statistics per $$k$$,
 - fitted amplitude $$\hat a$$ and derived integral estimate $$\widehat{I}(y).$$
 
+
 These outputs are intended to support:
 - cross-backend comparisons,
 - stability analysis under varying $$k$$ and shot budgets,
