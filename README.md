@@ -18,20 +18,14 @@ $$
 I(y) = \int_0^y g(x)\,dx,\qquad y\in[0,1],
 $$
 and approximate them by discretizing $$[0,y]$$ with $$2^n$$ points (here typically $$n=2$$, i.e., 4 points to fit in Triangulum). Using a uniform superposition over grid indices $$i\in\{0,\dots,2^n-1\}$$ and controlled single-qubit rotations on an ancilla, the state-preparation operator $$A$$ is constructed so that
-$$
-a := \Pr(\text{ancilla}=1\ \text{after }A|0\rangle)\approx \frac{1}{2^n}\sum_{i=0}^{2^n-1} g(x_i),
-$$
+$$a := \Pr(\text{ancilla}=1\ \text{after }A|0\rangle)\approx \frac{1}{2^n}\sum_{i=0}^{2^n-1} g(x_i),$$
 yielding the estimator $$I(y)\approx y\cdot a$$ for uniform grids.
 
 ### QAE without quantum phase estimation (MLAE-style)
 To mitigate depth and noise sensitivity, we employ a practical QAE approach based on amplitude amplification:
-$$
-|\psi_k\rangle = Q^k A|0\rangle,\qquad k\in\mathcal{K},
-$$
+$$|\psi_k\rangle = Q^k A|0\rangle,\qquad k\in\mathcal{K},$$
 with the canonical model
-$$
-p_k(a)=\Pr(\text{ancilla}=1\mid k)=\sin^2\!\big((2k+1)\theta\big),\qquad \theta=\arcsin(\sqrt{a}).
-$$
+$$p_k(a)=\Pr(\text{ancilla}=1\mid k)=\sin^2\!\big((2k+1)\theta\big),\qquad \theta=\arcsin(\sqrt{a}).$$
 From experimental counts $$\{(m_k,N_k)\}_{k\in\mathcal{K}}$$ we compute the maximum-likelihood estimate
 $$
 \hat a=\arg\max_{a\in[0,1]}\sum_{k\in\mathcal{K}}
