@@ -1,0 +1,151 @@
+# scripts/02_run_mlae_triangulum.py
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from datetime import datetime, timezone
+
+import pandas as pd
+
+from src.backends.nmr_triangulum import TriangulumBackend, TriangulumConfig
+from src.qae.mlae import run_mlae
+from src.qae.postprocess import mle_amplitude, amplitude_to_integral_report
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Run MLAE-style QAE numerical-integration demo on SpinQ Triangulum (NMR) via SpinQit."
+    )
+    # NMR connection
+    p.add_argument("--ip", type=str, required=True, help="Triangulum IP address.")
+    p.add_argument("--port", type=int, default=55444, help="Triangulum port (default 55444).")
+    p.add_argument("--account", type=str, required=True, help="Triangulum account/username.")
+    p.add_argument("--password", type=str, required=True, help="Triangulum password.")
+    p.add_argument("--task-name", type=str, default="qae_mlae", help="Task name in NMR backend.")
+    p.add_argument("--task-desc", type=str, default="MLAE-style QAE experiment", help="Task description in NMR backend.")
+
+    # Experiment parameters
+    p.add_argument("--y", type=float, default=1.0, help="Upper limit y in [0,1] for I(y)=∫_0^y g(x) dx.")
+    p.add_argument("--rule", type=str, default="midpoint", choices=["left", "right", "midpoint"])
+    p.add_argument("--ks", type=str, default="0,1,2", help="Comma-separated k values, e.g. '0,1,2'.")
+    p.add_argument("--shots", type=int, default=4096, help="Shots per k circuit.")
+
+    p.add_argument(
+        "--ancilla-bit-index-from-right",
+        type=int,
+        default=2,
+        help=(
+            "Which bit (from the right) corresponds to the ancilla in returned bitstrings. "
+            "For 3 qubits with ancilla qubit index=2, a common default is 2. "
+            "Adjust if your NMR backend bit ordering differs."
+        ),
+    )
+    p.add_argument("--outdir", type=str, default="data/raw", help="Output directory for raw JSON/CSV results.")
+    return p.parse_args()
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def main() -> None:
+    args = parse_args()
+    ks = tuple(int(x.strip()) for x in args.ks.split(",") if x.strip() != "")
+
+    backend = TriangulumBackend(
+        TriangulumConfig(
+            ip=args.ip,
+            port=args.port,
+            account=args.account,
+            password=args.password,
+            task_name=args.task_name,
+            task_desc=args.task_desc,
+        )
+    )
+
+    rr = run_mlae(
+        backend=backend,
+        y=args.y,
+        ks=ks,
+        rule=args.rule,
+        shots=args.shots,
+        ancilla_bit_index_from_right=args.ancilla_bit_index_from_right,
+    )
+
+    # Convert counts -> successes
+    successes = []
+    for counts in rr.counts_per_k:
+        total = sum(counts.values())
+        succ = 0
+        for bitstr, c in counts.items():
+            s = bitstr.replace("0b", "").strip()
+            if len(s) < args.ancilla_bit_index_from_right + 1:
+                s = s.zfill(args.ancilla_bit_index_from_right + 1)
+            anc_bit = s[-1 - args.ancilla_bit_index_from_right]
+            if anc_bit == "1":
+                succ += c
+        successes.append(succ)
+
+    shots_vec = [rr.shots] * len(rr.ks)
+
+    mle = mle_amplitude(rr.ks, successes, shots_vec)
+    report = amplitude_to_integral_report(rr.y, mle.a_hat)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"triangulum_y{args.y:g}_{args.rule}_ks{'-'.join(map(str, ks))}_shots{args.shots}_{stamp}"
+
+    ensure_dir(args.outdir)
+    out_json = os.path.join(args.outdir, f"{run_id}.json")
+    out_csv = os.path.join(args.outdir, f"{run_id}.csv")
+
+    payload = {
+        "run_id": run_id,
+        "backend": "triangulum_nmr",
+        "nmr": {
+            "ip": args.ip,
+            "port": args.port,
+            "task_name": args.task_name,
+            "task_desc": args.task_desc,
+        },
+        "y": rr.y,
+        "rule": rr.rule,
+        "ks": list(rr.ks),
+        "shots_per_k": rr.shots,
+        "p_hat": list(rr.p_hat),
+        "successes": successes,
+        "mle": {"a_hat": mle.a_hat, "theta_hat": mle.theta_hat, "nll": mle.nll},
+        "integral": {"I_hat": report.I_hat},
+        "counts_per_k": list(rr.counts_per_k),
+        "timestamp_utc": stamp,
+    }
+
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    # Flat CSV summary (one row per k)
+    rows = []
+    for k, p, succ in zip(rr.ks, rr.p_hat, successes):
+        rows.append(
+            {
+                "run_id": run_id,
+                "backend": "triangulum_nmr",
+                "y": rr.y,
+                "rule": rr.rule,
+                "k": k,
+                "shots": rr.shots,
+                "successes": succ,
+                "p_hat": p,
+                "a_hat_global": mle.a_hat,
+                "I_hat_global": report.I_hat,
+                "timestamp_utc": stamp,
+            }
+        )
+    pd.DataFrame(rows).to_csv(out_csv, index=False)
+
+    print(f"[OK] Wrote:\n  {out_json}\n  {out_csv}")
+    print(f"[MLE] a_hat={mle.a_hat:.6f}  I_hat={report.I_hat:.6f}")
+
+
+if __name__ == "__main__":
+    main()
