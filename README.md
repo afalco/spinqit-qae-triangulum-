@@ -145,18 +145,20 @@ is particularly suitable because, on the 2-qubit grid used here, its induced ang
 | Function | Exact integral on $[0,1]$ | Values in $[0,1]$ | Affine-angle friendly on 4-point grid | Simulator | Triangulum hardware | Suggested label |
 |---|---:|:---:|:---:|:---:|:---:|---|
 | $\sin^2(\pi x)$ | $\tfrac12$ | Yes | Yes | Yes | Yes | hardware-friendly |
-| $x$ | $\tfrac12$ | Yes | Yes | Yes | Yes | hardware-friendly |
+| $x$ | $\tfrac12$ | Yes | Yes | Yes | Midpoint only | midpoint-hardware-friendly |
 | $x^2$ | $\tfrac13$ | Yes | No | Yes | No (current path) | simulation-ready |
 | $4x(1-x)$ | $\tfrac23$ | Yes | No | Yes | No (current path) | simulation-ready |
-| $e^{-x}$ | $1-e^{-1}$ | Yes | No | Yes | Not recommended initially | simulation-ready |
+| $e^{-x}$ | $1-e^{-1}$ | Yes | No | Yes | Not recommended initially | simulation-first |
+| $\sqrt{x}$ | $\tfrac23$ | Yes | No | Yes | No (current path) | simulation-first |
 | General normalized smooth $g$ | depends on $g$ | If normalized | Not guaranteed | Yes | Case by case | simulation-ready |
 | Arbitrary high-complexity $g$ | depends on $g$ | not guaranteed | No | Sometimes | No, in general | simulation-only |
 
-This table reflects the current empirical status of the repository under the present state-preparation strategy. In particular, direct tests on Triangulum already support the classification:
+This table reflects the current empirical status of the repository under the present state-preparation strategy. In particular, direct tests on Triangulum currently support the more precise classification:
 
-- hardware-friendly: `sin2_pi`, `x`
+- full-campaign hardware-friendly: `sin2_pi`
+- midpoint-only hardware-friendly: `x`
 - simulation-ready: `x2`, `parabola`
-- simulation-first: `exp_minus_x`
+- simulation-first: `exp_minus_x`, `sqrt_x`
 
 ### 6. What is currently not the main target
 The present hardware workflow is not primarily designed for:
@@ -210,8 +212,9 @@ A practical criterion is:
 
 1. compute the four angles induced by the chosen quadrature rule,
 2. test whether they satisfy an affine relation in the index bits,
-3. if yes, use the compressed hardware implementation,
-4. if not, keep the function for simulator-only studies or introduce an explicit approximation strategy.
+3. test this **for each rule you want to run in hardware**,
+4. if yes, use the compressed hardware implementation,
+5. if not, keep the function for simulator-only studies or introduce an explicit approximation strategy.
 
 ### Recommended implementation roadmap
 A clean extension of the repository would proceed as follows:
@@ -221,6 +224,7 @@ A clean extension of the repository would proceed as follows:
 3. Record `gfunc` in all JSON/CSV outputs.
 4. Mark each function in the documentation as either:
    - `hardware-friendly`,
+   - `midpoint-only hardware-friendly`,
    - `simulation-ready`,
    - or `simulation-only` under the current Triangulum constraints.
 5. Add and use a small diagnostic utility that tests whether the discretized angle table is affine on the 2-qubit grid and reports a fit residual.
@@ -252,11 +256,11 @@ Typical usage:
 
 ```powershell
 python -m scripts.00_check_function_affinity --gfunc x --y 1.0 --rule midpoint
-python -m scripts.00_check_function_affinity --gfunc x2 --y 1.0 --rule midpoint
+python -m scripts.00_check_function_affinity --gfunc x --y 1.0 --rule left
 python -m scripts.00_check_function_affinity --gfunc exp_minus_x --y 1.0 --rule midpoint
 ```
 
-The intended workflow is to run this diagnostic first, and only attempt Triangulum hardware for functions that appear hardware-friendly under the current compression strategy.
+The intended workflow is to run this diagnostic first, and only attempt Triangulum hardware for functions that appear hardware-friendly under the current compression strategy and for the specific rule to be executed.
 
 ### Exploratory custom expressions
 
@@ -337,6 +341,8 @@ To recompute the campaign summary without relaunching hardware:
 ```powershell
 python -m scripts.04_run_triangulum_campaign --ip 10.30.227.5 --port 55444 --account USER --password PASSWORD --gfunc sin2_pi --y 1.0 --ks 0,1 --shots 1024 --reuse-existing
 ```
+
+The campaign script now performs a **rule-by-rule affine pre-check** before launching hardware. This means that commands such as a full three-rule campaign with `--gfunc x` will abort early with a specific warning, because `x` is currently compatible with `midpoint` hardware runs but not with the full `left`/`midpoint`/`right` campaign.
 
 ## Environment Setup
 A standard Python environment is enough. The execution and summarization scripts are written in a `pandas`-free style.
@@ -444,7 +450,7 @@ $$
 g(x)=x
 $$
 
-also succeeded under the same reduced schedule, whereas tests with
+also succeeded under the same reduced schedule for the **midpoint rule only**, whereas tests with
 
 $$
 g(x)=x^2
@@ -466,12 +472,12 @@ python -m scripts.00_check_function_affinity --gfunc x --y 1.0 --rule midpoint
 python -m scripts.01_run_mlae_sim --gfunc x --y 1.0 --rule midpoint --ks 0,1,2 --shots 4096 --ancilla-bit-index-from-right 0
 ```
 
-### 3. Run a reduced Triangulum test only for hardware-friendly functions
+### 3. Run a reduced Triangulum test only for hardware-friendly rules
 ```powershell
 python -m scripts.02_run_mlae_triangulum --ip $env:SPINQ_IP --port $env:SPINQ_PORT --account $env:SPINQ_USER --password $env:SPINQ_PASS --gfunc x --y 1.0 --rule midpoint --ks 0,1 --shots 1024
 ```
 
-### 4. Launch the full three-rule hardware campaign when appropriate
+### 4. Launch the full three-rule hardware campaign only when all requested rules are affine-friendly
 ```powershell
 python -m scripts.04_run_triangulum_campaign --ip $env:SPINQ_IP --port $env:SPINQ_PORT --account $env:SPINQ_USER --password $env:SPINQ_PASS --gfunc sin2_pi --y 1.0 --ks 0,1 --shots 1024
 ```
@@ -484,7 +490,7 @@ python -m scripts.04_run_triangulum_campaign --ip $env:SPINQ_IP --port $env:SPIN
 ## Troubleshooting
 
 ### `Line depth exceeds limit:60`
-The original exact pattern-controlled version of $A$ may exceed the Triangulum hardware limit. Use the compressed implementation currently included in `src/qae/state_prep.py`, run `scripts.00_check_function_affinity.py` first, and restrict hardware tests to functions that are hardware-friendly under the current criterion.
+The original exact pattern-controlled version of $A$ may exceed the Triangulum hardware limit. Use the compressed implementation currently included in `src/qae/state_prep.py`, run `scripts.00_check_function_affinity.py` first, and restrict hardware tests to functions that are hardware-friendly for the specific rule under consideration.
 
 ### `ModuleNotFoundError: No module named 'src'`
 Run the scripts from the repository root using module mode:
@@ -492,6 +498,9 @@ Run the scripts from the repository root using module mode:
 ```powershell
 python -m scripts.01_run_mlae_sim ...
 ```
+
+### Campaign aborts before hardware launch
+If `scripts.04_run_triangulum_campaign.py` aborts immediately, check whether at least one requested rule is non-affine for the chosen `gfunc`. This is expected behavior under the current implementation.
 
 ### Inconsistent simulator estimates for new functions
 Check the ancilla bit ordering. The simulator currently uses `--ancilla-bit-index-from-right 0` as working default. Using a mismatched bit index can produce apparently reasonable but incorrect estimates.
