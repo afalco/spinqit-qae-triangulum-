@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.qae.state_prep import exact_integral
+from src.qae.state_prep import build_A_spec, exact_integral, is_affine_hardware_friendly
 
 DEFAULT_RULES = ("left", "midpoint", "right")
 DEFAULT_KS = "0,1"
@@ -127,6 +127,31 @@ def find_newest_matching_json(raw_outdir: Path, prefix: str) -> Path:
     if not matches:
         raise FileNotFoundError(f"No JSON files found in {raw_outdir} matching prefix '{prefix}'.")
     return matches[-1]
+
+
+def check_affinity_per_rule(y: float, gfunc: str, rules: tuple[str, ...]) -> dict[str, bool]:
+    result: dict[str, bool] = {}
+    for rule in rules:
+        spec = build_A_spec(y=y, rule=rule, gfunc=gfunc)
+        result[rule] = is_affine_hardware_friendly(spec)
+    return result
+
+
+def abort_if_not_affine_friendly(y: float, gfunc: str, rules: tuple[str, ...]) -> None:
+    affinity = check_affinity_per_rule(y=y, gfunc=gfunc, rules=rules)
+    bad_rules = [rule for rule, ok in affinity.items() if not ok]
+
+    if bad_rules:
+        details = ", ".join(f"{rule}=non-affine" for rule in bad_rules)
+        all_details = ", ".join(f"{rule}={'affine' if ok else 'non-affine'}" for rule, ok in affinity.items())
+        raise SystemExit(
+            "[ABORT] The requested campaign was not launched because the function is not "
+            f"affine-friendly for all requested rules. gfunc='{gfunc}', y={y}. "
+            f"Failing rules: {details}. Full check: {all_details}. "
+            "Under the current Triangulum implementation, the three-rule campaign should only be run "
+            "when all requested rules are affine-friendly. "
+            "Use scripts.00_check_function_affinity per rule and/or restrict hardware runs to the midpoint rule."
+        )
 
 
 def run_single_rule(args: argparse.Namespace, rule: str) -> Path:
@@ -299,6 +324,9 @@ def main() -> None:
     rules = tuple(x.strip() for x in args.rules.split(",") if x.strip())
     if set(rules) != set(DEFAULT_RULES):
         raise SystemExit("This campaign script currently expects exactly the three rules: left, midpoint, right.")
+
+    # Pre-check before any hardware execution
+    abort_if_not_affine_friendly(y=args.y, gfunc=args.gfunc, rules=rules)
 
     ensure_dir(args.raw_outdir)
     ensure_dir(args.processed_outdir)
