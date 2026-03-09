@@ -7,6 +7,8 @@ Although the main target of this manual is **hardware execution on Triangulum**,
 - `scripts/00_check_function_affinity.py` for pre-screening functions under the current depth-constrained hardware assumptions,
 - `scripts/01_run_mlae_sim.py` for simulator validation before sending a new function or configuration to hardware.
 
+This manual also reflects the current behavior of `scripts/04_run_triangulum_campaign.py`: before launching hardware, the campaign script performs a **rule-by-rule affine-friendliness check** and aborts if any requested rule is not compatible with the current compressed Triangulum path.
+
 ---
 
 ## 1. Prerequisites
@@ -21,7 +23,7 @@ Although the main target of this manual is **hardware execution on Triangulum**,
 - `scripts/01_run_mlae_sim.py`: simulator validation entrypoint
 - `scripts/02_run_mlae_triangulum.py`: main Triangulum execution entrypoint
 - `scripts/03_summarize_results.py`: merges raw JSON runs into CSV summaries
-- `scripts/04_run_triangulum_campaign.py`: optional three-rule campaign launcher
+- `scripts/04_run_triangulum_campaign.py`: optional three-rule campaign launcher with rule-by-rule affine pre-check
 - `data/raw/`: raw results (JSON + per-run CSV)
 - `data/processed/`: aggregated summaries
 - `src/backends/nmr_triangulum.py`: backend wrapper (`NMRConfig` + engine call)
@@ -115,11 +117,11 @@ Under the current implementation, the simulator working default is:
 ### 4.3 Current practical classification
 Based on the current implementation and tests:
 
-- **hardware-friendly**: `sin2_pi`, `x`
+- **hardware-friendly under midpoint**: `sin2_pi`, `x`
 - **simulation-ready**: `x2`, `parabola`
 - **simulation-first**: `exp_minus_x`, `sqrt_x`
 
-Only hardware-friendly functions should be sent to Triangulum directly under the present depth-constrained path.
+This classification should **not** be interpreted as global compatibility across all quadrature rules. In particular, a function may be affine-friendly for `midpoint` and non-affine for `left` or `right`.
 
 ---
 
@@ -216,7 +218,7 @@ Run the affinity diagnostic first:
 python -m scripts.00_check_function_affinity --gfunc sin2_pi --y 1.0 --rule midpoint
 ```
 
-If the function is not classified as hardware-friendly, do **not** send it directly to Triangulum under the present implementation.
+If the function is not classified as hardware-friendly for the rule you want to run, do **not** send it directly to Triangulum under the present implementation.
 
 ### 7.2 Step 2 — Simulator validation
 
@@ -310,6 +312,20 @@ python -m scripts.04_run_triangulum_campaign \
   --gfunc sin2_pi --y 1.0 --ks 0,1 --shots 1024 --reuse-existing
 ```
 
+### 7.6 Important campaign restriction: compatibility is checked per rule
+
+Before launching any hardware subprocess, `scripts.04_run_triangulum_campaign.py` now checks whether the requested `gfunc` is affine-friendly for **each requested rule**.
+
+This matters because a function can be hardware-friendly for `midpoint` and non-friendly for `left` or `right`.
+
+For example, under the current implementation:
+
+- `sin2_pi` is compatible with the full three-rule campaign,
+- `x` is compatible with direct `midpoint` hardware runs,
+- but `x` is **not** compatible with the full three-rule campaign because `left` and `right` are not affine-friendly for the current compressed path.
+
+If any requested rule is not affine-friendly, the campaign script aborts before sending anything to hardware and prints a specific warning.
+
 ---
 
 ## 8. Aggregating Results
@@ -357,21 +373,35 @@ This indicates that the current circuit exceeds the Triangulum hardware budget.
 
 Actions:
 
-- run `scripts/00_check_function_affinity.py` first,
-- validate in simulation with `scripts/01_run_mlae_sim.py`,
-- restrict hardware tests to functions classified as hardware-friendly,
+- run `scripts.00_check_function_affinity.py` first,
+- validate in simulation with `scripts.01_run_mlae_sim.py`,
+- restrict hardware tests to functions classified as hardware-friendly for the requested rule,
 - keep `--ks 0,1`,
-- do not assume that a function working in simulation is hardware-compatible.
+- do not assume that a function working in simulation is hardware-compatible across all quadrature rules.
 
 At the current stage, direct tests indicate:
 
 - `sin2_pi`: works
-- `x`: works
+- `x`: works for `midpoint`
 - `x2`: exceeds depth limit
 - `parabola`: exceeds depth limit
 - `sqrt_x`: exceeds depth limit
 
-### 9.3 Counts look degenerate (all 0 or all 1)
+### 9.3 Campaign aborts before hardware launch
+
+If `scripts.04_run_triangulum_campaign.py` aborts immediately with an affine-compatibility warning, this means that at least one requested rule is not affine-friendly for the chosen `gfunc`.
+
+Typical example:
+
+- `gfunc = x` with the full three-rule campaign fails the pre-check because `left` and `right` are non-affine under the current compressed hardware path.
+
+Actions:
+
+- run `scripts.00_check_function_affinity.py` separately for each rule,
+- restrict hardware execution to `midpoint` when appropriate,
+- use the full campaign only for functions that are affine-friendly for all requested rules.
+
+### 9.4 Counts look degenerate (all 0 or all 1)
 
 Actions:
 
@@ -380,7 +410,7 @@ Actions:
 - reduce shots initially (some backends have hidden limits)
 - confirm Triangulum calibration status (T1/T2, temperature stability)
 
-### 9.4 Backend API mismatch
+### 9.5 Backend API mismatch
 
 If SpinQit version differs, you may need to adapt:
 
