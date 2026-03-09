@@ -22,8 +22,9 @@ dist/
 .idea/
 
 # OS files
-.DS_Store
 Thumbs.db
+.DS_Store
+**/.DS_Store
 
 # Experimental outputs
 data/raw/*
