@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 from .grover_op import apply_Q_iteration
-from .state_prep import ASpec, build_A_spec, apply_A_from_spec
+from .state_prep import ASpec, GFunc, build_A_spec, apply_A_from_spec
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,7 @@ class RunResult:
     """
     y: float
     rule: str
+    gfunc: str
     ks: Tuple[int, ...]
     shots: int
     counts_per_k: Tuple[Dict[str, int], ...]  # bitstring -> count
@@ -98,6 +99,7 @@ def run_mlae(
     ancilla_qubit: int = 2,
     index_qubits: Sequence[int] = (0, 1),
     ancilla_bit_index_from_right: int = 2,
+    gfunc: GFunc = "sin2_pi",
 ) -> RunResult:
     """
     Execute MLAE-style runs for each k in `ks` on the provided backend wrapper.
@@ -109,6 +111,7 @@ def run_mlae(
     Parameters:
       - y: integral upper limit in [0,1]
       - rule: 'left' | 'right' | 'midpoint'
+      - gfunc: target function identifier
       - ks: list of amplification indices
       - shots: number of shots per circuit
       - ancilla_bit_index_from_right: how to locate ancilla bit in returned bitstrings
@@ -117,6 +120,7 @@ def run_mlae(
         y=y,
         n_index_qubits=len(index_qubits),
         rule=rule,  # type: ignore
+        gfunc=gfunc,
         index_qubits=index_qubits,
         ancilla=ancilla_qubit,
     )
@@ -147,6 +151,7 @@ def run_mlae(
     return RunResult(
         y=float(y),
         rule=str(rule),
+        gfunc=str(gfunc),
         ks=tuple(int(k) for k in ks),
         shots=int(shots),
         counts_per_k=tuple(counts_list),

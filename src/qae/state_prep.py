@@ -7,33 +7,57 @@ from typing import List, Literal, Sequence, Tuple
 
 from .quadrature import Rule, grid_points
 
-GFunc = Literal["sin2_pi"]  # extensible
+GFunc = Literal[
+    "sin2_pi",
+    "x",
+    "x2",
+    "sqrt_x",
+    "exp_minus_x",
+    "parabola",
+]
 
 
 @dataclass(frozen=True)
 class ASpec:
-    """
-    Declarative specification of the state-preparation operator A.
-
-    For 2 index qubits (Triangulum), A is:
-      - H on each index qubit
-      - For each basis |i>, apply controlled Ry(theta_i) on ancilla,
-        where theta_i encodes g(x_i).
-
-    We store:
-      - index_qubits: positions (e.g., [0,1])
-      - ancilla: position (e.g., 2)
-      - patterns: list of (bitpattern, theta) where bitpattern is tuple of bits for index qubits
-    """
     index_qubits: Tuple[int, ...]
     ancilla: int
-    patterns: Tuple[Tuple[Tuple[int, ...], float], ...]  # ((bits...), theta)
+    patterns: Tuple[Tuple[Tuple[int, ...], float], ...]
+
+
+def _clip01(v: float) -> float:
+    return min(max(v, 0.0), 1.0)
 
 
 def _g_value(x: float, gfunc: GFunc) -> float:
     if gfunc == "sin2_pi":
         return math.sin(math.pi * x) ** 2
+    if gfunc == "x":
+        return x
+    if gfunc == "x2":
+        return x**2
+    if gfunc == "sqrt_x":
+        return math.sqrt(x)
+    if gfunc == "exp_minus_x":
+        return math.exp(-x)
+    if gfunc == "parabola":
+        return 4.0 * x * (1.0 - x)
     raise ValueError(f"Unknown gfunc: {gfunc}")
+
+
+def exact_integral(y: float, gfunc: GFunc) -> float | None:
+    if gfunc == "sin2_pi":
+        return 0.5 * y - math.sin(2.0 * math.pi * y) / (4.0 * math.pi)
+    if gfunc == "x":
+        return 0.5 * y**2
+    if gfunc == "x2":
+        return y**3 / 3.0
+    if gfunc == "sqrt_x":
+        return (2.0 / 3.0) * y ** 1.5
+    if gfunc == "exp_minus_x":
+        return 1.0 - math.exp(-y)
+    if gfunc == "parabola":
+        return 2.0 * y**2 - (4.0 / 3.0) * y**3
+    return None
 
 
 def build_A_spec(
@@ -44,17 +68,6 @@ def build_A_spec(
     index_qubits: Sequence[int] = (0, 1),
     ancilla: int = 2,
 ) -> ASpec:
-    """
-    Build a Triangulum-friendly A-spec with 2 index qubits + 1 ancilla by default.
-
-    We use the convenient encoding:
-      Pr(anc=1 | i) = sin^2(theta_i/2)
-
-    For g(x)=sin^2(pi x), we can set:
-      theta_i = 2*pi*x_i
-
-    so that sin^2(theta_i/2) = sin^2(pi x_i) = g(x_i).
-    """
     if len(index_qubits) != n_index_qubits:
         raise ValueError("index_qubits length must match n_index_qubits.")
     grid = grid_points(y=y, n=n_index_qubits, rule=rule)
@@ -64,53 +77,29 @@ def build_A_spec(
     for i in range(m):
         bits = tuple((i >> (n_index_qubits - 1 - b)) & 1 for b in range(n_index_qubits))
         x_i = grid.points[i]
+
         if gfunc == "sin2_pi":
             theta = 2.0 * math.pi * x_i
         else:
-            # Generic fallback: theta = 2*arcsin(sqrt(g(x)))
-            gx = _g_value(x_i, gfunc)
-            gx = min(max(gx, 0.0), 1.0)
+            gx = _clip01(_g_value(x_i, gfunc))
             theta = 2.0 * math.asin(math.sqrt(gx))
+
         patterns.append((bits, theta))
 
     return ASpec(index_qubits=tuple(index_qubits), ancilla=ancilla, patterns=tuple(patterns))
 
 
 def _get_gates():
-    """
-    Import SpinQit gates lazily to keep import-time failures localized.
-
-    NOTE: SpinQit API names may vary by version. If your installation differs,
-    adapt this function to map to your local gate constructors.
-    """
     from spinqit import H, X, Ry  # type: ignore
-
-    try:
-        from spinqit.primitive import MultiControlledGateBuilder  # type: ignore
-    except Exception as e:
-        raise ImportError(
-            "Could not import MultiControlledGateBuilder from spinqit. "
-            "Please adapt _get_gates() to your SpinQit version."
-        ) from e
-
+    from spinqit.primitive import MultiControlledGateBuilder  # type: ignore
     return H, X, Ry, MultiControlledGateBuilder
 
 
-def _extract_affine_angles_for_two_controls(spec: ASpec):
-    """
-    If the 4 pattern angles satisfy
-        theta(b0,b1) = c0 + c1*b0 + c2*b1
-    return (c0, c1, c2). Otherwise return None.
-
-    Bit ordering follows spec.patterns as produced by build_A_spec:
-      (0,0), (0,1), (1,0), (1,1)
-    with b0 = first index qubit, b1 = second index qubit.
-    """
+def _extract_affine_angles_for_two_controls(spec: ASpec, tol: float = 1e-9):
     if len(spec.index_qubits) != 2 or len(spec.patterns) != 4:
         return None
 
     angle_map = {bits: theta for bits, theta in spec.patterns}
-
     required = [(0, 0), (0, 1), (1, 0), (1, 1)]
     if any(bits not in angle_map for bits in required):
         return None
@@ -124,10 +113,14 @@ def _extract_affine_angles_for_two_controls(spec: ASpec):
     c1 = t10 - t00
     c2 = t01 - t00
 
-    if abs((c0 + c1 + c2) - t11) > 1e-9:
+    if abs((c0 + c1 + c2) - t11) > tol:
         return None
 
     return c0, c1, c2
+
+
+def is_affine_hardware_friendly(spec: ASpec, tol: float = 1e-9) -> bool:
+    return _extract_affine_angles_for_two_controls(spec, tol=tol) is not None
 
 
 def _apply_single_controlled_ry(circuit, control: int, target: int, theta: float):
@@ -146,14 +139,6 @@ def _apply_controlled_ry_on_pattern(
     theta: float,
     bits: Tuple[int, ...],
 ):
-    """
-    Apply a multi-controlled Ry(theta) on ancilla, conditioned on controls
-    being exactly 'bits'.
-
-    We implement the exact bit-pattern condition by X-flipping the controls
-    where bits[j] = 0, so the condition becomes all-ones, then applying a
-    multi-controlled Ry(theta), then undoing the flips.
-    """
     H, X, Ry, MultiControlledGateBuilder = _get_gates()
 
     flipped = []
@@ -163,26 +148,16 @@ def _apply_controlled_ry_on_pattern(
             flipped.append(q)
 
     mc_ry = MultiControlledGateBuilder(len(controls), Ry, [theta]).to_gate()
-
     qubits = tuple(list(controls) + [ancilla])
-
-    try:
-        circuit << (mc_ry, qubits)
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not apply multi-controlled Ry on qubits {qubits}. "
-            "Your local SpinQit build may use a different call signature."
-        ) from e
+    circuit << (mc_ry, qubits)
 
     for q in flipped:
         circuit << (X, q)
 
 
 def apply_A_from_spec(circuit, spec: ASpec):
-    """Append the state-preparation operator A described by `spec` to `circuit`."""
     H, X, Ry, MultiControlledGateBuilder = _get_gates()
 
-    # Uniform superposition over index
     for q in spec.index_qubits:
         circuit << (H, q)
 
@@ -198,20 +173,11 @@ def apply_A_from_spec(circuit, spec: ASpec):
         _apply_single_controlled_ry(circuit, q1, a, c2)
         return
 
-    # Generic fallback: exact pattern-controlled implementation
     for bits, theta in spec.patterns:
         _apply_controlled_ry_on_pattern(circuit, spec.index_qubits, spec.ancilla, theta, bits)
 
 
 def apply_Adag_from_spec(circuit, spec: ASpec):
-    r"""
-    Append A^\dagger to `circuit`.
-
-    Since A is a sequence of:
-      H on index qubits (self-inverse),
-      followed by controlled Ry(theta_i),
-    we implement the inverse by reversing the sequence and negating angles.
-    """
     H, X, Ry, MultiControlledGateBuilder = _get_gates()
 
     affine = _extract_affine_angles_for_two_controls(spec)
@@ -229,10 +195,8 @@ def apply_Adag_from_spec(circuit, spec: ASpec):
             circuit << (H, q)
         return
 
-    # Generic fallback: reverse order, angle -> -angle
     for bits, theta in reversed(spec.patterns):
         _apply_controlled_ry_on_pattern(circuit, spec.index_qubits, spec.ancilla, -theta, bits)
 
-    # Inverse of H on index qubits (self-inverse)
     for q in spec.index_qubits:
         circuit << (H, q)

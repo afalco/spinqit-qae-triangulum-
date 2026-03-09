@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import os
 import subprocess
 import sys
@@ -13,9 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.qae.state_prep import exact_integral
+
 DEFAULT_RULES = ("left", "midpoint", "right")
 DEFAULT_KS = "0,1"
 DEFAULT_SHOTS = 1024
+DEFAULT_GFUNC = "sin2_pi"
+GFUNC_CHOICES = ["sin2_pi", "x", "x2", "sqrt_x", "exp_minus_x", "parabola"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +40,7 @@ def parse_args() -> argparse.Namespace:
         help="Task description.",
     )
     p.add_argument("--y", type=float, default=1.0, help="Upper limit y in [0,1].")
+    p.add_argument("--gfunc", type=str, default=DEFAULT_GFUNC, choices=GFUNC_CHOICES, help="Target function g(x).")
     p.add_argument("--ks", type=str, default=DEFAULT_KS, help="Comma-separated k values, typically '0,1'.")
     p.add_argument("--shots", type=int, default=DEFAULT_SHOTS, help="Shots per rule.")
     p.add_argument(
@@ -129,7 +133,10 @@ def run_single_rule(args: argparse.Namespace, rule: str) -> Path:
     raw_outdir = Path(args.raw_outdir)
     ensure_dir(str(raw_outdir))
 
-    prefix = f"triangulum_y{args.y:g}_{rule}_ks{args.ks.replace(',', '-')}_shots{args.shots}_"
+    prefix = (
+        f"triangulum_{args.gfunc}_y{args.y:g}_{rule}_"
+        f"ks{args.ks.replace(',', '-')}_shots{args.shots}_"
+    )
 
     if args.reuse_existing:
         try:
@@ -139,7 +146,7 @@ def run_single_rule(args: argparse.Namespace, rule: str) -> Path:
         except FileNotFoundError:
             print(f"[REUSE] No existing JSON found for rule='{rule}'. Launching hardware run.")
 
-    task_name = f"{args.task_prefix}_{rule}"
+    task_name = f"{args.task_prefix}_{args.gfunc}_{rule}"
     cmd = [
         args.python_executable,
         "-m",
@@ -158,6 +165,8 @@ def run_single_rule(args: argparse.Namespace, rule: str) -> Path:
         args.task_desc,
         "--y",
         str(args.y),
+        "--gfunc",
+        args.gfunc,
         "--rule",
         rule,
         "--ks",
@@ -180,11 +189,11 @@ def run_single_rule(args: argparse.Namespace, rule: str) -> Path:
     return newest
 
 
-def exact_integral_sin2_pi(y: float) -> float:
-    return 0.5 * y - math.sin(2.0 * math.pi * y) / (4.0 * math.pi)
+def classify_function_for_current_hardware(hardware_friendly: bool | None) -> str:
+    return "hardware-friendly" if hardware_friendly else "simulation-ready"
 
 
-def summarize_campaign(json_paths: dict[str, Path], y: float) -> dict[str, Any]:
+def summarize_campaign(json_paths: dict[str, Path], y: float, gfunc: str) -> dict[str, Any]:
     records: dict[str, dict[str, Any]] = {}
     for rule, path in json_paths.items():
         records[rule] = load_json(path)
@@ -196,41 +205,48 @@ def summarize_campaign(json_paths: dict[str, Path], y: float) -> dict[str, Any]:
     i_left = float(records["left"]["integral"]["I_hat"])
     i_mid = float(records["midpoint"]["integral"]["I_hat"])
     i_right = float(records["right"]["integral"]["I_hat"])
-    i_exact = exact_integral_sin2_pi(y)
+
+    i_exact = exact_integral(y, gfunc)
     i_simpson = (i_left + 4.0 * i_mid + i_right) / 6.0
 
+    hardware_friendly = records["left"].get("hardware_friendly_affine", None)
+    function_class = classify_function_for_current_hardware(hardware_friendly)
+
     return {
-        "campaign_id": f"triangulum_campaign_y{y:g}_{current_utc_stamp()}",
+        "campaign_id": f"triangulum_campaign_{gfunc}_y{y:g}_{current_utc_stamp()}",
         "y": y,
+        "gfunc": gfunc,
         "ks": records["left"].get("ks"),
         "shots_per_k": records["left"].get("shots_per_k"),
         "I_exact": i_exact,
+        "hardware_friendly_affine": hardware_friendly,
+        "function_class": function_class,
         "rules": {
             "left": {
                 "run_id": records["left"].get("run_id"),
                 "I_hat": i_left,
                 "a_hat": records["left"].get("mle", {}).get("a_hat"),
-                "abs_error": abs(i_left - i_exact),
+                "abs_error": (abs(i_left - i_exact) if i_exact is not None else None),
                 "source_json": os.path.basename(json_paths["left"]),
             },
             "midpoint": {
                 "run_id": records["midpoint"].get("run_id"),
                 "I_hat": i_mid,
                 "a_hat": records["midpoint"].get("mle", {}).get("a_hat"),
-                "abs_error": abs(i_mid - i_exact),
+                "abs_error": (abs(i_mid - i_exact) if i_exact is not None else None),
                 "source_json": os.path.basename(json_paths["midpoint"]),
             },
             "right": {
                 "run_id": records["right"].get("run_id"),
                 "I_hat": i_right,
                 "a_hat": records["right"].get("mle", {}).get("a_hat"),
-                "abs_error": abs(i_right - i_exact),
+                "abs_error": (abs(i_right - i_exact) if i_exact is not None else None),
                 "source_json": os.path.basename(json_paths["right"]),
             },
         },
         "simpson": {
             "I_hat": i_simpson,
-            "abs_error": abs(i_simpson - i_exact),
+            "abs_error": (abs(i_simpson - i_exact) if i_exact is not None else None),
             "formula": "(I_left + 4*I_midpoint + I_right)/6",
         },
     }
@@ -246,6 +262,9 @@ def flatten_campaign_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "campaign_id": summary["campaign_id"],
                 "kind": "rule",
+                "gfunc": summary["gfunc"],
+                "function_class": summary["function_class"],
+                "hardware_friendly_affine": summary["hardware_friendly_affine"],
                 "rule": rule,
                 "I_exact": i_exact,
                 "I_hat": rec["I_hat"],
@@ -260,6 +279,9 @@ def flatten_campaign_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "campaign_id": summary["campaign_id"],
             "kind": "combined",
+            "gfunc": summary["gfunc"],
+            "function_class": summary["function_class"],
+            "hardware_friendly_affine": summary["hardware_friendly_affine"],
             "rule": "simpson",
             "I_exact": i_exact,
             "I_hat": summary["simpson"]["I_hat"],
@@ -287,17 +309,17 @@ def main() -> None:
         if args.pause_seconds > 0 and idx < len(rules) - 1:
             time.sleep(args.pause_seconds)
 
-    summary = summarize_campaign(json_paths, y=args.y)
+    summary = summarize_campaign(json_paths, y=args.y, gfunc=args.gfunc)
     rows = flatten_campaign_rows(summary)
 
     stamp = current_utc_stamp()
     out_json = (
         Path(args.processed_outdir)
-        / f"campaign_summary_y{args.y:g}_ks{args.ks.replace(',', '-')}_shots{args.shots}_{stamp}.json"
+        / f"campaign_summary_{args.gfunc}_y{args.y:g}_ks{args.ks.replace(',', '-')}_shots{args.shots}_{stamp}.json"
     )
     out_csv = (
         Path(args.processed_outdir)
-        / f"campaign_summary_y{args.y:g}_ks{args.ks.replace(',', '-')}_shots{args.shots}_{stamp}.csv"
+        / f"campaign_summary_{args.gfunc}_y{args.y:g}_ks{args.ks.replace(',', '-')}_shots{args.shots}_{stamp}.csv"
     )
 
     with open(out_json, "w", encoding="utf-8") as f:
@@ -307,6 +329,7 @@ def main() -> None:
     print(f"[OK] Wrote:\n  {out_json}\n  {out_csv}")
     print(
         "[SUMMARY] "
+        f"gfunc={summary['gfunc']}  "
         f"I_left={summary['rules']['left']['I_hat']:.9f}  "
         f"I_midpoint={summary['rules']['midpoint']['I_hat']:.9f}  "
         f"I_right={summary['rules']['right']['I_hat']:.9f}  "

@@ -58,6 +58,9 @@ def main() -> None:
         run_id = obj.get("run_id", os.path.basename(fp).replace(".json", ""))
         backend = obj.get("backend", "unknown")
         y = obj.get("y", None)
+        gfunc = obj.get("gfunc", None)
+        function_class = obj.get("function_class", None)
+        hardware_friendly = obj.get("hardware_friendly_affine", None)
         rule = obj.get("rule", None)
         ks = obj.get("ks", [])
         shots = obj.get("shots_per_k", None)
@@ -67,18 +70,29 @@ def main() -> None:
         integral = obj.get("integral", {})
         stamp = obj.get("timestamp_utc", None)
 
+        i_hat = integral.get("I_hat", None)
+        i_exact = obj.get("exact_integral", None)
+        abs_error = obj.get("abs_error_global", None)
+        if abs_error is None and i_hat is not None and i_exact is not None:
+            abs_error = abs(i_hat - i_exact)
+
         rows.append(
             {
                 "run_id": run_id,
                 "backend": backend,
                 "y": y,
+                "gfunc": gfunc,
+                "function_class": function_class,
+                "hardware_friendly_affine": hardware_friendly,
                 "rule": rule,
                 "ks": ",".join(str(k) for k in ks),
                 "shots_per_k": shots,
                 "a_hat": mle.get("a_hat", None),
                 "theta_hat": mle.get("theta_hat", None),
                 "nll": mle.get("nll", None),
-                "I_hat": integral.get("I_hat", None),
+                "I_hat": i_hat,
+                "exact_integral": i_exact,
+                "abs_error": abs_error,
                 "timestamp_utc": stamp,
                 "source_json": os.path.basename(fp),
             }
@@ -90,6 +104,9 @@ def main() -> None:
                     "run_id": run_id,
                     "backend": backend,
                     "y": y,
+                    "gfunc": gfunc,
+                    "function_class": function_class,
+                    "hardware_friendly_affine": hardware_friendly,
                     "rule": rule,
                     "k": k,
                     "shots": shots,
