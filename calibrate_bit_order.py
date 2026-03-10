@@ -1,11 +1,10 @@
-#calibrate_bit_order.py
+# calibrate_bit_order.py
 from __future__ import annotations
 
 import argparse
 import csv
 import json
 import os
-from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -35,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--shots", type=int, default=256, help="Shots per test circuit.")
     p.add_argument("--outdir", type=str, default="bit_order_calibration", help="Output directory.")
+    p.add_argument(
+        "--probe-only",
+        action="store_true",
+        help="Only probe the backend API and exit without running circuits.",
+    )
 
     # Triangulum-only params
     p.add_argument("--ip", type=str, default=None, help="Triangulum IP.")
@@ -82,8 +86,7 @@ def expected_bitstring_q0q1q2(flips: list[int]) -> str:
 
 
 def expected_bitstring_q2q1q0(flips: list[int]) -> str:
-    q0q1q2 = expected_bitstring_q0q1q2(flips)
-    return q0q1q2[::-1]
+    return expected_bitstring_q0q1q2(flips)[::-1]
 
 
 def build_circuit(flips: list[int]):
@@ -128,55 +131,173 @@ def make_backend(args: argparse.Namespace):
     return engine, conf
 
 
-def run_circuit(engine, conf, circ, shots: int):
-    if conf is None:
-        # simulator
+def public_attrs(obj: Any) -> list[str]:
+    return [name for name in dir(obj) if not name.startswith("_")]
 
-        # 1) direct execute(circ, shots=...)
-        try:
-            return engine.execute(circ, shots=shots)
-        except Exception:
-            pass
 
-        # 2) direct execute(circ) without shots
-        try:
-            return engine.execute(circ)
-        except Exception:
-            pass
+def probe_backend_api(args: argparse.Namespace) -> dict[str, Any]:
+    payload: dict[str, Any] = {"backend": args.backend}
 
-        # 3) compile + execute(compiled, config/shots) depending on local SpinQit API
+    if args.backend == "sim":
+        from spinqit import get_basic_simulator  # type: ignore
+
+        engine = get_basic_simulator()
+        payload["engine_type"] = str(type(engine))
+        payload["engine_public_attrs"] = public_attrs(engine)
+
         try:
             from spinqit import get_compiler  # type: ignore
 
             compiler = get_compiler()
-            compiled = compiler.compile(circ, 0)
+            payload["compiler_type"] = str(type(compiler))
+            payload["compiler_public_attrs"] = public_attrs(compiler)
+        except Exception as e:
+            payload["compiler_probe_error"] = repr(e)
 
-            # common patterns seen across versions
-            try:
-                return engine.execute(compiled, shots)
-            except Exception:
-                pass
+        try:
+            from spinqit import get_basic_simulator_config  # type: ignore
 
-            try:
-                return engine.execute(compiled, shots=shots)
-            except Exception:
-                pass
-
-            try:
-                return engine.execute(compiled)
-            except Exception:
-                pass
-
-        except Exception:
-            pass
-
-        raise RuntimeError(
-            "Could not execute circuit on simulator backend. "
-            "Your local SpinQit version likely requires a different simulator invocation."
-        )
+            cfg = get_basic_simulator_config()
+            payload["sim_config_type"] = str(type(cfg))
+            payload["sim_config_public_attrs"] = public_attrs(cfg)
+        except Exception as e:
+            payload["sim_config_probe_error"] = repr(e)
 
     else:
-        # Triangulum
+        from spinqit import get_nmr, NMRConfig  # type: ignore
+
+        engine = get_nmr()
+        payload["engine_type"] = str(type(engine))
+        payload["engine_public_attrs"] = public_attrs(engine)
+
+        conf = NMRConfig()
+        payload["config_type"] = str(type(conf))
+        payload["config_public_attrs"] = public_attrs(conf)
+
+    return payload
+
+
+def print_probe(payload: dict[str, Any]) -> None:
+    print("=== BACKEND PROBE ===")
+    print("backend:", payload.get("backend"))
+    print("engine_type:", payload.get("engine_type"))
+    print("engine_public_attrs:")
+    for name in payload.get("engine_public_attrs", []):
+        print(" ", name)
+
+    if "compiler_type" in payload:
+        print("compiler_type:", payload.get("compiler_type"))
+        print("compiler_public_attrs:")
+        for name in payload.get("compiler_public_attrs", []):
+            print(" ", name)
+
+    if "sim_config_type" in payload:
+        print("sim_config_type:", payload.get("sim_config_type"))
+        print("sim_config_public_attrs:")
+        for name in payload.get("sim_config_public_attrs", []):
+            print(" ", name)
+
+    if "config_type" in payload:
+        print("config_type:", payload.get("config_type"))
+        print("config_public_attrs:")
+        for name in payload.get("config_public_attrs", []):
+            print(" ", name)
+
+    for key in ("compiler_probe_error", "sim_config_probe_error"):
+        if key in payload:
+            print(f"{key}: {payload[key]}")
+
+
+def run_circuit(engine, conf, circ, shots: int):
+    if conf is None:
+        errors: list[str] = []
+
+        # 1) direct execute(circ, shots=...)
+        try:
+            return engine.execute(circ, shots=shots)
+        except Exception as e:
+            errors.append(f"engine.execute(circ, shots=shots): {repr(e)}")
+
+        # 2) direct execute(circ, shots)
+        try:
+            return engine.execute(circ, shots)
+        except Exception as e:
+            errors.append(f"engine.execute(circ, shots): {repr(e)}")
+
+        # 3) direct execute(circ)
+        try:
+            return engine.execute(circ)
+        except Exception as e:
+            errors.append(f"engine.execute(circ): {repr(e)}")
+
+        # 4) compile + execute(compiled, ...)
+        try:
+            from spinqit import get_compiler  # type: ignore
+
+            compiler = get_compiler()
+            compile_errors: list[str] = []
+
+            compiled = None
+            for label, call in [
+                ("compiler.compile(circ, 0)", lambda: compiler.compile(circ, 0)),
+                ("compiler.compile(circ)", lambda: compiler.compile(circ)),
+            ]:
+                try:
+                    compiled = call()
+                    break
+                except Exception as e:
+                    compile_errors.append(f"{label}: {repr(e)}")
+
+            if compiled is None:
+                errors.extend(compile_errors)
+            else:
+                for label, call in [
+                    ("engine.execute(compiled, shots=shots)", lambda: engine.execute(compiled, shots=shots)),
+                    ("engine.execute(compiled, shots)", lambda: engine.execute(compiled, shots)),
+                    ("engine.execute(compiled)", lambda: engine.execute(compiled)),
+                ]:
+                    try:
+                        return call()
+                    except Exception as e:
+                        errors.append(f"{label}: {repr(e)}")
+
+                # 5) compiled + simulator config if available
+                try:
+                    from spinqit import get_basic_simulator_config  # type: ignore
+
+                    cfg = get_basic_simulator_config()
+                    for setter_name in ("configure_shots", "set_shots"):
+                        if hasattr(cfg, setter_name):
+                            try:
+                                getattr(cfg, setter_name)(shots)
+                            except Exception as e:
+                                errors.append(f"{setter_name}(shots): {repr(e)}")
+
+                    for label, call in [
+                        ("engine.execute(compiled, cfg)", lambda: engine.execute(compiled, cfg)),
+                        ("engine.execute(compiled, cfg, shots)", lambda: engine.execute(compiled, cfg, shots)),
+                        ("engine.execute(compiled, cfg, shots=shots)", lambda: engine.execute(compiled, cfg, shots=shots)),
+                    ]:
+                        try:
+                            return call()
+                        except Exception as e:
+                            errors.append(f"{label}: {repr(e)}")
+
+                except Exception as e:
+                    errors.append(f"get_basic_simulator_config(): {repr(e)}")
+
+        except Exception as e:
+            errors.append(f"get_compiler(): {repr(e)}")
+
+        msg = (
+            "Could not execute circuit on simulator backend.\n"
+            "Tried the following call patterns:\n- "
+            + "\n- ".join(errors)
+            + "\n\nRun again with --probe-only to inspect the backend API."
+        )
+        raise RuntimeError(msg)
+
+    else:
         try:
             return engine.execute(circ, conf, shots=shots)
         except Exception:
@@ -185,34 +306,23 @@ def run_circuit(engine, conf, circ, shots: int):
             except Exception as e:
                 raise RuntimeError("Could not execute circuit on Triangulum backend.") from e
 
-def infer_order(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Use single-flip tests to infer whether the backend reports q0q1q2 or q2q1q0.
-    """
-    by_name = {r["test_name"]: r for r in rows}
 
+def infer_order(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_name = {r["test_name"]: r for r in rows}
     needed = ["x_q0", "x_q1", "x_q2"]
+
     if not all(name in by_name for name in needed):
-        return {
-            "reported_order": "undetermined",
-            "reason": "Missing single-flip tests.",
-        }
+        return {"reported_order": "undetermined", "reason": "Missing single-flip tests."}
 
     dom_q0 = clean_bitstring(by_name["x_q0"]["dominant_bitstring"]).zfill(3)
     dom_q1 = clean_bitstring(by_name["x_q1"]["dominant_bitstring"]).zfill(3)
     dom_q2 = clean_bitstring(by_name["x_q2"]["dominant_bitstring"]).zfill(3)
 
     if dom_q0 == "100" and dom_q1 == "010" and dom_q2 == "001":
-        return {
-            "reported_order": "q0q1q2",
-            "reason": "Single-flip tests match q0q1q2 ordering.",
-        }
+        return {"reported_order": "q0q1q2", "reason": "Single-flip tests match q0q1q2 ordering."}
 
     if dom_q0 == "001" and dom_q1 == "010" and dom_q2 == "100":
-        return {
-            "reported_order": "q2q1q0",
-            "reason": "Single-flip tests match q2q1q0 ordering.",
-        }
+        return {"reported_order": "q2q1q0", "reason": "Single-flip tests match q2q1q0 ordering."}
 
     return {
         "reported_order": "undetermined",
@@ -229,6 +339,7 @@ def write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         with open(path, "w", encoding="utf-8", newline="") as f:
             pass
         return
+
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
@@ -238,6 +349,16 @@ def write_csv(path: str, rows: list[dict[str, Any]]) -> None:
 def main() -> None:
     args = parse_args()
     ensure_dir(args.outdir)
+
+    if args.probe_only:
+        payload = probe_backend_api(args)
+        print_probe(payload)
+
+        out_json = os.path.join(args.outdir, f"probe_{args.backend}_{utc_stamp()}.json")
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[OK] Wrote probe: {out_json}")
+        return
 
     engine, conf = make_backend(args)
 
@@ -249,37 +370,51 @@ def main() -> None:
         "tests": [],
     }
 
-    for case in TEST_CASES:
-        circ = build_circuit(case["flips"])
-        result = run_circuit(engine, conf, circ, shots=args.shots)
-        counts = normalize_counts(result)
-        dom = dominant_bitstring(counts)
+    try:
+        for case in TEST_CASES:
+            circ = build_circuit(case["flips"])
+            result = run_circuit(engine, conf, circ, shots=args.shots)
+            counts = normalize_counts(result)
+            dom = dominant_bitstring(counts)
 
-        expected_a = expected_bitstring_q0q1q2(case["flips"])
-        expected_b = expected_bitstring_q2q1q0(case["flips"])
+            expected_a = expected_bitstring_q0q1q2(case["flips"])
+            expected_b = expected_bitstring_q2q1q0(case["flips"])
 
-        row = {
-            "test_name": case["name"],
-            "flips": ",".join(str(q) for q in case["flips"]),
-            "expected_if_q0q1q2": expected_a,
-            "expected_if_q2q1q0": expected_b,
-            "dominant_bitstring": clean_bitstring(dom),
-            "shots": args.shots,
-            "match_q0q1q2": clean_bitstring(dom).zfill(3) == expected_a,
-            "match_q2q1q0": clean_bitstring(dom).zfill(3) == expected_b,
-        }
-        rows.append(row)
-
-        full_payload["tests"].append(
-            {
+            row = {
                 "test_name": case["name"],
-                "flips": case["flips"],
+                "flips": ",".join(str(q) for q in case["flips"]),
                 "expected_if_q0q1q2": expected_a,
                 "expected_if_q2q1q0": expected_b,
                 "dominant_bitstring": clean_bitstring(dom),
-                "counts": counts,
+                "shots": args.shots,
+                "match_q0q1q2": clean_bitstring(dom).zfill(3) == expected_a,
+                "match_q2q1q0": clean_bitstring(dom).zfill(3) == expected_b,
             }
-        )
+            rows.append(row)
+
+            full_payload["tests"].append(
+                {
+                    "test_name": case["name"],
+                    "flips": case["flips"],
+                    "expected_if_q0q1q2": expected_a,
+                    "expected_if_q2q1q0": expected_b,
+                    "dominant_bitstring": clean_bitstring(dom),
+                    "counts": counts,
+                }
+            )
+    except RuntimeError as e:
+        if args.backend == "sim":
+            probe = probe_backend_api(args)
+            full_payload["probe_on_failure"] = probe
+            print(str(e))
+            print()
+            print_probe(probe)
+
+            out_json = os.path.join(args.outdir, f"bit_order_failure_probe_{args.backend}_{utc_stamp()}.json")
+            with open(out_json, "w", encoding="utf-8") as f:
+                json.dump(full_payload, f, indent=2)
+            print(f"[OK] Wrote failure probe: {out_json}")
+        raise
 
     inference = infer_order(rows)
     full_payload["inference"] = inference
